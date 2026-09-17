@@ -1,0 +1,19 @@
+dataset:
+  kind: synthetic
+  sizes: [24, 12, 12]
+data_seed: 42
+encoder:
+  kind: hash
+model:
+  kind: mock
+methods: [multimodal, feedback]
+variants: [full, no_image, no_question, no_answer, no_diversity, no_feedback]
+seeds: [0, 1, 2]
+ks: [0, 1, 2, 4, 8]
+orderings: [best_first]
+context_budgets: [512]
+feedback_candidates: 8
+candidate_pool: 24
+redundancy_penalty: 0.25
+epochs: 60
+threads: 1

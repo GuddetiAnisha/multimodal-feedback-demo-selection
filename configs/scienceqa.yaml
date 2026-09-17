@@ -1,0 +1,28 @@
+# First prepare local data with scripts/prepare_data.py.
+dataset:
+  kind: jsonl
+  demos: data/scienceqa/demos.jsonl
+  feedback: data/scienceqa/feedback.jsonl
+  evaluation: data/scienceqa/evaluation.jsonl
+encoder:
+  kind: clip
+  model: clip-ViT-B-32
+  device: cpu
+model:
+  kind: hf
+  model_id: Qwen/Qwen2.5-VL-3B-Instruct
+  revision: main  # Replace with a commit hash for a frozen thesis experiment.
+  device: auto
+  max_new_tokens: 32
+methods: [random, visual, textual, multimodal, feedback, grip_approx]
+variants: [full]
+seeds: [0, 1, 2]
+ks: [0, 1, 2, 4, 8]
+orderings: [best_first, best_last, random]
+context_budgets: [4096, 8192]
+feedback_context_budget: 8192
+feedback_candidates: 16
+candidate_pool: 64
+redundancy_penalty: 0.25
+epochs: 100
+threads: 1

@@ -1,0 +1,177 @@
+"""Reproducible feedback collection, training, ablations and held-out evaluation."""
+import argparse
+import hashlib
+import importlib.metadata
+import itertools
+import json
+from pathlib import Path
+import platform
+import time
+import numpy as np
+import pandas as pd
+import torch
+import yaml
+from .data import synthetic, load_jsonl, validate_splits
+from .embeddings import HashEncoder, ClipEncoder, retrieval_view
+from .evaluation import score, report
+from .models import MockLMM, HuggingFaceLMM
+from .retrievers import VectorIndex, UtilityRetriever, ExternalGrip, pair_features
+from .selectors import select, order, fit_context, diversity
+
+METHODS = {"random", "visual", "textual", "multimodal", "feedback", "grip_approx", "grip_external"}
+CHANNELS = {"full": ("image", "question", "answer"), "no_answer": ("image", "question"),
+            "no_image": ("question", "answer"), "no_question": ("image", "answer"),
+            "no_diversity": ("image", "question", "answer"), "no_feedback": ("image", "question", "answer")}
+
+
+def run(config, output):
+    output = Path(output)
+    output.mkdir(parents=True, exist_ok=True)
+    if (output / "manifest.json").exists():
+        raise FileExistsError("Use a fresh output directory to preserve prior results")
+    methods = config.get("methods", sorted(METHODS - {"grip_external"}))
+    variants = config.get("variants", ["full"])
+    if set(methods)-METHODS or set(variants)-set(CHANNELS):
+        raise ValueError("Unknown method or ablation")
+    if not config["ks"] or any(k < 0 for k in config["ks"]):
+        raise ValueError("Nonempty nonnegative ks required")
+    if not methods or not variants or not config.get("seeds", [0]):
+        raise ValueError("Nonempty methods, variants, and seeds required")
+    if not config["orderings"] or set(config["orderings"]) - {"best_first", "best_last", "random"}:
+        raise ValueError("Invalid orderings")
+    if not config["context_budgets"] or min(config["context_budgets"]) <= 0:
+        raise ValueError("Positive context budgets required")
+    for key in ["feedback_candidates", "candidate_pool", "epochs"]:
+        if config.get(key, 1) < 1:
+            raise ValueError(f"{key} must be positive")
+    torch.set_num_threads(config.get("threads", 1))
+    dataset = config.get("dataset", {"kind": "synthetic"})
+    if dataset["kind"] == "synthetic":
+        demos, train, test = synthetic(output / "fixtures", config.get("data_seed", 42), tuple(dataset.get("sizes", [24, 12, 12])))
+    elif dataset["kind"] == "jsonl":
+        demos, train, test = [load_jsonl(dataset[key]) for key in ["demos", "feedback", "evaluation"]]
+    else:
+        raise ValueError("Use synthetic or prepared jsonl dataset")
+    validate_splits(demos, train, test)
+    ecfg = config.get("encoder", {"kind": "hash"})
+    if ecfg["kind"] not in {"hash", "clip"}:
+        raise ValueError("Unknown encoder")
+    encoder = HashEncoder() if ecfg["kind"] == "hash" else ClipEncoder(ecfg.get("model", "clip-ViT-B-32"), ecfg.get("device", "cpu"))
+    mcfg = config.get("model", {"kind": "mock"})
+    if mcfg["kind"] not in {"mock", "hf"}:
+        raise ValueError("Unknown model")
+    model = MockLMM() if mcfg["kind"] == "mock" else HuggingFaceLMM(**{k: v for k, v in mcfg.items() if k != "kind"})
+    manifest = {"config": config, "status": "running", "mock": mcfg["kind"] == "mock", "synthetic": dataset["kind"] == "synthetic",
+                "token_measurement": model.token_measurement, "python": platform.python_version(),
+                "versions": {p: importlib.metadata.version(p) for p in ["torch", "numpy", "scikit-learn", "pandas", "Pillow"]},
+                "split_ids": {k: [x.id for x in v] for k, v in [("demos", demos), ("feedback", train), ("evaluation", test)]}}
+    # Include content fingerprints so replacing data under a filename is detectable.
+    manifest["data_sha256"] = hashlib.sha256(json.dumps([
+        [x.id, x.question, x.answer, x.choices, x.answers, hashlib.sha256(Path(x.image).read_bytes()).hexdigest() if x.image else None]
+        for x in demos+train+test], sort_keys=True).encode()).hexdigest()
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (output / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    # Features encode demonstration answers; both query splits are answer-masked.
+    encoded = {v: (encoder.encode(demos, channels=CHANNELS[v]),
+                   encoder.encode([x.query() for x in train], query=True, channels=CHANNELS[v]),
+                   encoder.encode([x.query() for x in test], query=True, channels=CHANNELS[v])) for v in variants}
+    for x in train + test:
+        fit_context(x.query(), [], model, min(config["context_budgets"]))
+    train_zero = [score(model.predict(x.query(), []).text, x) for x in train]
+    test_zero = [score(model.predict(x.query(), []).text, x) for x in test]
+    rows, feedback_rows, losses = [], [], []
+    external = ExternalGrip(config["grip_scores"]) if "grip_external" in methods else None
+    for seed in config.get("seeds", [0]):
+        rng = np.random.default_rng(seed)
+        pairs, rewards = [], []
+        # Sample uniformly to retain positive, zero, and negative feedback; no test labels.
+        for qi, query in enumerate(train):
+            for di in rng.choice(len(demos), size=min(len(demos), config.get("feedback_candidates", 8)), replace=False):
+                selected, _ = fit_context(query.query(), [demos[di]], model, config.get("feedback_context_budget", max(config["context_budgets"])))
+                if not selected:
+                    raise ValueError("Feedback context budget cannot fit one demonstration")
+                pred = model.predict(query.query(), selected)
+                value = score(pred.text, query)
+                reward = value-train_zero[qi]
+                pairs.append((qi, int(di)))
+                rewards.append(reward)
+                feedback_rows.append({"seed": seed, "query_id": query.id, "demo_id": demos[di].id,
+                                      "zero_score": train_zero[qi], "demo_score": value, "reward": reward, "prediction": pred.text})
+        for variant in variants:
+            d, qtrain, qtest = encoded[variant]
+            trained = {}
+            for learned in set(methods) & {"feedback", "grip_approx"}:
+                ds, qs = (d[:, :encoder.dim], qtrain[:, :encoder.dim]) if learned == "grip_approx" else (d, qtrain)
+                net = UtilityRetriever(ds.shape[1], seed)
+                features = np.stack([pair_features(qs[qi], ds[di]) for qi, di in pairs])
+                history = net.fit(features, rewards, epochs=config.get("epochs", 60))
+                net.save(output / f"retriever_{variant}_{learned}_{seed}.pt")
+                losses.extend({"variant": variant, "method": learned, "seed": seed, "epoch": i, "mse": value} for i, value in enumerate(history))
+                trained[learned] = net
+            indexes = {m: VectorIndex(retrieval_view(d, m), config.get("index_backend", "auto"))
+                       for m in ["visual", "textual", "multimodal"]}
+            manifest["index_backend"] = indexes["multimodal"].backend
+            for qi, example in enumerate(test):
+                query = example.query()
+                for method in methods:
+                    started = time.perf_counter()
+                    q = qtest[qi]
+                    # Fixed candidate cap; random baseline samples the whole pool.
+                    actual_method = "multimodal" if variant == "no_feedback" and method == "feedback" else method
+                    if actual_method == "random":
+                        ids = rng.permutation(len(demos))[:config.get("candidate_pool", 32)]
+                        scores = rng.random(len(ids))
+                    else:
+                        search_method = actual_method if actual_method in indexes else ("visual" if actual_method == "grip_approx" else "multimodal")
+                        ids, scores = indexes[search_method].search(retrieval_view(q, search_method), config.get("candidate_pool", 32))
+                        if actual_method in trained:
+                            qs, ds = (q[:encoder.dim], d[ids, :encoder.dim]) if actual_method == "grip_approx" else (q, d[ids])
+                            scores = trained[actual_method].score(qs, ds)
+                        elif actual_method == "grip_external":
+                            scores = external.score(example.id, [demos[i].id for i in ids])
+                    retrieval_time = time.perf_counter()-started
+                    for k, ordering, budget in itertools.product(config["ks"], config["orderings"], config["context_budgets"]):
+                        strength = config.get("redundancy_penalty", .25) if actual_method in {"feedback", "grip_approx", "grip_external"} and variant != "no_diversity" else 0
+                        selection_vectors = d[ids, :encoder.dim] if actual_method == "grip_approx" else d[ids]
+                        local = select(scores, selection_vectors, k, strength)
+                        local = order(local, scores, ordering, rng)
+                        selected_ids = [int(ids[i]) for i in local]
+                        kept, tokens = fit_context(query, [demos[i] for i in selected_ids], model, budget)
+                        selected_ids = selected_ids[:len(kept)]
+                        pred = model.predict(query, kept)
+                        value = score(pred.text, example)
+                        div, red = diversity(d[selected_ids])
+                        rows.append({"seed": seed, "variant": variant, "method": method, "k": k, "ordering": ordering,
+                                     "context_budget": budget, "query_id": example.id, "query_group": example.group or example.id,
+                                     "prediction": pred.text, "target": example.answer, "score": value, "zero_score": test_zero[qi],
+                                     "gain": value-test_zero[qi], "effective_k": len(kept), "demo_ids": json.dumps([x.id for x in kept]),
+                                     "latency_s": pred.seconds, "retrieval_s": retrieval_time, "input_tokens": pred.input_tokens,
+                                     "output_tokens": pred.output_tokens, "diversity": div, "redundancy": red,
+                                     "predicted_utility": float(np.mean(scores[local[:len(kept)]])) if kept and actual_method in trained else None})
+        print(f"Completed seed {seed}: {len(rows)} prediction rows", flush=True)
+    frame = pd.DataFrame(rows)
+    frame.to_csv(output / "predictions.csv", index=False)
+    pd.DataFrame(feedback_rows).to_csv(output / "feedback.csv", index=False)
+    feedback_frame = pd.DataFrame(feedback_rows)
+    feedback_frame.assign(positive=feedback_frame.reward.gt(0), negative=feedback_frame.reward.lt(0)).groupby("seed").agg(
+        mean_reward=("reward", "mean"), positive_fraction=("positive", "mean"),
+        negative_fraction=("negative", "mean"), pairs=("reward", "size")).to_csv(output / "feedback_summary.csv")
+    pd.DataFrame(losses).to_csv(output / "training.csv", index=False)
+    report(frame, output, manifest["mock"] or manifest["synthetic"])
+    manifest["status"] = "complete"
+    manifest["prediction_rows"] = len(rows)
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return frame
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/mock.yaml")
+    parser.add_argument("--output", default="results/mock")
+    args = parser.parse_args()
+    config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    run(config, args.output)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mfgds"
+version = "0.1.0"
+description = "Multimodal feedback-guided demonstration selection research prototype"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.2", "numpy>=1.26", "scikit-learn>=1.4", "Pillow>=10", "pandas>=2.1", "matplotlib>=3.8", "PyYAML>=6"]
+
+[project.optional-dependencies]
+hf = ["transformers>=4.51,<5", "accelerate>=1", "sentence-transformers>=3,<6"]
+faiss = ["faiss-cpu>=1.8"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+mfgds = "mfgds.experiment:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
