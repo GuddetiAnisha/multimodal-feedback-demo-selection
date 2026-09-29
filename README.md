@@ -192,3 +192,37 @@ Begin with zero-shot and similarity baselines on a small subset. Inspect the rew
 Freeze hyperparameters on a development split, run multiple training seeds and then evaluate held-out benchmark queries. Future extensions include conditional marginal feedback for sets, pairwise/listwise training, longer-text encoders, near-duplicate filtering, embedding/feedback caching, batched inference and resumable expensive sweeps. These are not implemented claims.
 
 References: [ScienceQA](https://github.com/lupantech/ScienceQA), [VQA evaluation](https://visualqa.org/evaluation.html), [GRIP](https://arxiv.org/abs/2606.12744), [Sentence Transformers image/text models](https://www.sbert.net/docs/sentence_transformer/pretrained_models.html#image-text-models).
+
+
+## Multimodal Sensor Fusion Robustness Extension
+
+This repository now also includes a lightweight software-only prototype for
+studying missing-modality robustness in a multimodal perception pipeline.
+
+The extension is designed to support research questions related to robust
+autonomous-driving perception without claiming a full vehicle sensor stack.
+
+Implemented components:
+
+- synthetic camera-, LiDAR-, and RADAR-like feature generation from a shared
+  latent scene representation;
+- feature-level multimodal fusion using a PyTorch classifier;
+- controlled modality dropout for camera, LiDAR, and RADAR channels;
+- learned missing-modality completion using the remaining modalities;
+- graceful-degradation evaluation with accuracy and macro-F1;
+- deterministic seeds, automated tests, and JSON experiment reports.
+
+Run the experiment with:
+
+~~~sh
+python scripts/run_sensor_fusion_robustness.py --output results/sensor_fusion_robustness.json
+~~~
+
+The experiment compares the full-modality baseline with each single-modality
+dropout condition and with completion-assisted recovery.
+
+**Scope limitation:** this extension uses synthetic feature vectors. It does
+not use real camera/LiDAR/RADAR measurements, bird's-eye-view geometry,
+3D bounding boxes, a pretrained BEV detector, or physically realistic adverse
+weather. It should be described as a multimodal sensor-fusion robustness
+prototype, not as a production autonomous-driving perception system.
