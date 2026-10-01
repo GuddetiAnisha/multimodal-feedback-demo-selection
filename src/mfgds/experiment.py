@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
+from .checkpoints import Checkpoints, atomic_bytes, output_lock
 from .data import synthetic, load_jsonl, validate_splits
 from .embeddings import HashEncoder, ClipEncoder, retrieval_view
 from .evaluation import score, report
@@ -24,10 +25,15 @@ CHANNELS = {"full": ("image", "question", "answer"), "no_answer": ("image", "que
             "no_diversity": ("image", "question", "answer"), "no_feedback": ("image", "question", "answer")}
 
 
-def run(config, output):
+def run(config, output, resume=False):
+    with output_lock(output):
+        return _run(config, output, resume)
+
+
+def _run(config, output, resume=False):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
-    if (output / "manifest.json").exists():
+    if not resume and ((output / "manifest.json").exists() or (output / "checkpoints").exists()):
         raise FileExistsError("Use a fresh output directory to preserve prior results")
     methods = config.get("methods", sorted(METHODS - {"grip_external"}))
     variants = config.get("variants", ["full"])
@@ -44,6 +50,13 @@ def run(config, output):
     for key in ["feedback_candidates", "candidate_pool", "epochs"]:
         if config.get(key, 1) < 1:
             raise ValueError(f"{key} must be positive")
+    # Duplicate grid values would duplicate observations even in a fresh run.
+    for key in ["methods", "variants", "seeds", "ks", "orderings", "context_budgets"]:
+        values = config.get(key, [])
+        if len(values) != len(set(values)):
+            raise ValueError(f"Duplicate {key} values")
+    checkpoints = Checkpoints(output)
+    state = checkpoints.load() if resume else None
     torch.set_num_threads(config.get("threads", 1))
     dataset = config.get("dataset", {"kind": "synthetic"})
     if dataset["kind"] == "synthetic":
@@ -67,9 +80,23 @@ def run(config, output):
                 "split_ids": {k: [x.id for x in v] for k, v in [("demos", demos), ("feedback", train), ("evaluation", test)]}}
     # Include content fingerprints so replacing data under a filename is detectable.
     manifest["data_sha256"] = hashlib.sha256(json.dumps([
-        [x.id, x.question, x.answer, x.choices, x.answers, hashlib.sha256(Path(x.image).read_bytes()).hexdigest() if x.image else None]
+        [x.id, x.question, x.answer, x.choices, x.answers, x.group, hashlib.sha256(Path(x.image).read_bytes()).hexdigest() if x.image else None]
         for x in demos+train+test], sort_keys=True).encode()).hexdigest()
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    identity = {"config": config, "data_sha256": manifest["data_sha256"], "versions": manifest["versions"], "python": manifest["python"]}
+    if "grip_scores" in config:
+        identity["grip_sha256"] = hashlib.sha256(Path(config["grip_scores"]).read_bytes()).hexdigest()
+    if state is not None and state["identity"] != identity:
+        raise ValueError("Resume configuration, data or dependency versions differ from checkpoint")
+    if state is not None:
+        print(f"Resuming valid checkpoint {checkpoints.sequence}: {state['progress']}; "
+              f"skipping {len(state['rows'])} committed evaluation units", flush=True)
+    if state is None:
+        state = {"identity": identity, "rows": {}, "feedback": {}, "training": {}, "zero": {}, "progress": {}}
+    def persist(**progress):
+        state["progress"] = progress
+        checkpoints.save(state)
+    persist(stage="initializing")
+    atomic_bytes(output / "manifest.json", json.dumps(manifest, indent=2).encode())
     (output / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     # Features encode demonstration answers; both query splits are answer-masked.
     encoded = {v: (encoder.encode(demos, channels=CHANNELS[v]),
@@ -77,8 +104,17 @@ def run(config, output):
                    encoder.encode([x.query() for x in test], query=True, channels=CHANNELS[v])) for v in variants}
     for x in train + test:
         fit_context(x.query(), [], model, min(config["context_budgets"]))
-    train_zero = [score(model.predict(x.query(), []).text, x) for x in train]
-    test_zero = [score(model.predict(x.query(), []).text, x) for x in test]
+    def zero_scores(split, examples):
+        values = []
+        for x in examples:
+            key = (split, x.id)
+            if key not in state["zero"]:
+                state["zero"][key] = score(model.predict(x.query(), []).text, x)
+                persist(stage="zero_shot", split=split, query=x.id)
+            values.append(state["zero"][key])
+        return values
+    train_zero = zero_scores("feedback", train)
+    test_zero = zero_scores("evaluation", test)
     rows, feedback_rows, losses = [], [], []
     external = ExternalGrip(config["grip_scores"]) if "grip_external" in methods else None
     for seed in config.get("seeds", [0]):
@@ -87,6 +123,13 @@ def run(config, output):
         # Sample uniformly to retain positive, zero, and negative feedback; no test labels.
         for qi, query in enumerate(train):
             for di in rng.choice(len(demos), size=min(len(demos), config.get("feedback_candidates", 8)), replace=False):
+                feedback_key = (seed, qi, int(di))
+                if feedback_key in state["feedback"]:
+                    cached = state["feedback"][feedback_key]
+                    pairs.append((qi, int(di)))
+                    rewards.append(cached["reward"])
+                    feedback_rows.append(cached)
+                    continue
                 selected, _ = fit_context(query.query(), [demos[di]], model, config.get("feedback_context_budget", max(config["context_budgets"])))
                 if not selected:
                     raise ValueError("Feedback context budget cannot fit one demonstration")
@@ -97,14 +140,23 @@ def run(config, output):
                 rewards.append(reward)
                 feedback_rows.append({"seed": seed, "query_id": query.id, "demo_id": demos[di].id,
                                       "zero_score": train_zero[qi], "demo_score": value, "reward": reward, "prediction": pred.text})
+                state["feedback"][feedback_key] = feedback_rows[-1]
+                persist(stage="feedback", seed=seed, query=query.id, demo=demos[di].id,
+                        generator=rng.bit_generator.state)
         for variant in variants:
             d, qtrain, qtest = encoded[variant]
             trained = {}
-            for learned in set(methods) & {"feedback", "grip_approx"}:
+            for learned in sorted(set(methods) & {"feedback", "grip_approx"}):
                 ds, qs = (d[:, :encoder.dim], qtrain[:, :encoder.dim]) if learned == "grip_approx" else (d, qtrain)
                 net = UtilityRetriever(ds.shape[1], seed)
                 features = np.stack([pair_features(qs[qi], ds[di]) for qi, di in pairs])
-                history = net.fit(features, rewards, epochs=config.get("epochs", 60))
+                training_key = (seed, variant, learned)
+                def save_epoch(payload):
+                    state["training"][training_key] = payload
+                    persist(stage="training", seed=seed, variant=variant, method=learned,
+                            epoch=payload["epoch"], generator=rng.bit_generator.state)
+                history = net.fit(features, rewards, epochs=config.get("epochs", 60),
+                                  resume_state=state["training"].get(training_key), checkpoint=save_epoch)
                 net.save(output / f"retriever_{variant}_{learned}_{seed}.pt")
                 losses.extend({"variant": variant, "method": learned, "seed": seed, "epoch": i, "mse": value} for i, value in enumerate(history))
                 trained[learned] = net
@@ -138,6 +190,11 @@ def run(config, output):
                         selected_ids = [int(ids[i]) for i in local]
                         kept, tokens = fit_context(query, [demos[i] for i in selected_ids], model, budget)
                         selected_ids = selected_ids[:len(kept)]
+                        unit = (seed, variant, qi, method, k, ordering, budget)
+                        # Replay cheap selection RNG draws in original order, skip inference.
+                        if unit in state["rows"]:
+                            rows.append(state["rows"][unit])
+                            continue
                         pred = model.predict(query, kept)
                         value = score(pred.text, example)
                         div, red = diversity(d[selected_ids])
@@ -148,6 +205,10 @@ def run(config, output):
                                      "latency_s": pred.seconds, "retrieval_s": retrieval_time, "input_tokens": pred.input_tokens,
                                      "output_tokens": pred.output_tokens, "diversity": div, "redundancy": red,
                                      "predicted_utility": float(np.mean(scores[local[:len(kept)]])) if kept and actual_method in trained else None})
+                        state["rows"][unit] = rows[-1]
+                        persist(stage="evaluation", seed=seed, variant=variant, method=method,
+                                k=k, ordering=ordering, context_budget=budget, query=example.id,
+                                generator=rng.bit_generator.state)
         print(f"Completed seed {seed}: {len(rows)} prediction rows", flush=True)
     frame = pd.DataFrame(rows)
     frame.to_csv(output / "predictions.csv", index=False)
@@ -160,7 +221,8 @@ def run(config, output):
     report(frame, output, manifest["mock"] or manifest["synthetic"])
     manifest["status"] = "complete"
     manifest["prediction_rows"] = len(rows)
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    persist(stage="complete", prediction_rows=len(rows))
+    atomic_bytes(output / "manifest.json", json.dumps(manifest, indent=2).encode())
     return frame
 
 
@@ -168,9 +230,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/mock.yaml")
     parser.add_argument("--output", default="results/mock")
+    parser.add_argument("--resume", action="store_true", help="Continue the latest valid checkpoint in --output")
     args = parser.parse_args()
     config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
-    run(config, args.output)
+    try:
+        run(config, args.output, resume=args.resume)
+    except KeyboardInterrupt:
+        print("Stopped. Resume with the same --config and --output plus --resume.", flush=True)
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

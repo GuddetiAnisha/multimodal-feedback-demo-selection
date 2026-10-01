@@ -17,7 +17,28 @@ python -m venv .venv
 .venv/Scripts/python -m mfgds.experiment --config configs/ablations.yaml --output results/my_ablations
 ~~~
 
-On Linux/macOS replace .venv/Scripts/python with .venv/bin/python. Mock mode downloads no model or dataset; PyTorch trains the utility network. Each run needs a fresh output directory. Predictions/selections were reproducible in the tested CPU environment; timings vary.
+On Linux/macOS replace .venv/Scripts/python with .venv/bin/python. Mock mode downloads no model or dataset; PyTorch trains the utility network. Start each new run in a fresh output directory; use `--resume` to continue an existing run. Predictions/selections were reproducible in the tested CPU environment; timings vary.
+
+## Stop and resume on the college computer
+
+From the project folder in PowerShell, after installing the dependencies above:
+
+~~~powershell
+# First session (prepared ScienceQA data and HF dependencies required):
+.\.venv\Scripts\python.exe run_experiments.py --config configs/scienceqa.yaml --output results/scienceqa_trial
+# Later sessions: use exactly the same config and output directory.
+.\.venv\Scripts\python.exe run_experiments.py --config configs/scienceqa.yaml --output results/scienceqa_trial --resume
+~~~
+
+For an offline trial, replace `configs/scienceqa.yaml` with `configs/mock.yaml` and use `--output results/my_mock_run`. The existing `python -m mfgds.experiment` and `scripts/run_experiment.py` entry points accept the same options.
+
+Press **Ctrl+C once** in the terminal to stop; wait for the stop message before shutting down. In PyCharm, choose `.venv\Scripts\python.exe` as the interpreter, `run_experiments.py` as the script, and the project folder as the working directory. Set Parameters to `--config configs/scienceqa.yaml --output results/scienceqa_trial`; add `--resume` for subsequent sessions. Prefer Ctrl+C in PyCharm's Terminal. Its Stop button or a sudden shutdown also leaves previously committed checkpoints usable.
+
+Checkpointing occurs after every utility-training epoch, feedback sample, zero-shot query, and evaluation unit (seed, variant, query, method, k, ordering, context budget), plus final completion. Checkpoints include utility-model weights, AdamW state, next-epoch progress, complete loss history, Python/NumPy/PyTorch/CUDA RNG states, selection-generator state and partial results. This training has no scheduler; its state is recorded as `None`. The large HF model remains an inference model and is reloaded from the configured model/revision. Pin that revision for reproducibility.
+
+`--resume` chooses the newest valid checksummed generation and warns if it falls back to the previous generation. Writes are flushed and atomically replaced; incomplete `.tmp` files are ignored. If both generations are invalid or missing, resume fails without silently restarting. The current uncommitted epoch or inference call may be repeated. Committed work is skipped; completed results are rebuilt without repeating inference. Selection draws are replayed cheaply from the seed to preserve the original experiment ordering. CSVs and plots are regenerated from checkpoint results, so an interrupted report can be repaired by resuming.
+
+Keep the **entire output folder**, especially `checkpoints/`, on storage that survives college-PC cleanup. Keep the original config, datasets, model cache and Python environment available. Resume rejects changed configuration, dataset content, external GRIP scores, Python or core package versions. Only one process can write an output folder. Checkpoints contain trusted Python/PyTorch serialization: only resume checkpoints created by your own run. Saving full progress after each unit favors recoverability over disk speed and may be costly for very large sweeps. The separate sensor-fusion extension has its existing behavior; these resume options apply to demonstration-selection experiments.
 
 Dependencies and optional extras are in [pyproject.toml](pyproject.toml). [requirements-tested.txt](requirements-tested.txt) records packages from the local verification environment; its CPU PyTorch wheel requires the PyTorch CPU index when reinstalling.
 
@@ -189,7 +210,7 @@ Aggregation rejects duplicate observations and incompatible data/configuration/d
 
 Begin with zero-shot and similarity baselines on a small subset. Inspect the reward distribution: accuracy-difference feedback may be sparse or identically zero. Increasing feedback coverage or adding a separately validated probabilistic reward may help. A decreasing training loss alone does not prove useful retrieval.
 
-Freeze hyperparameters on a development split, run multiple training seeds and then evaluate held-out benchmark queries. Future extensions include conditional marginal feedback for sets, pairwise/listwise training, longer-text encoders, near-duplicate filtering, embedding/feedback caching, batched inference and resumable expensive sweeps. These are not implemented claims.
+Freeze hyperparameters on a development split, run multiple training seeds and then evaluate held-out benchmark queries. Future extensions include conditional marginal feedback for sets, pairwise/listwise training, longer-text encoders, near-duplicate filtering and batched inference. These are not implemented claims.
 
 References: [ScienceQA](https://github.com/lupantech/ScienceQA), [VQA evaluation](https://visualqa.org/evaluation.html), [GRIP](https://arxiv.org/abs/2606.12744), [Sentence Transformers image/text models](https://www.sbert.net/docs/sentence_transformer/pretrained_models.html#image-text-models).
 

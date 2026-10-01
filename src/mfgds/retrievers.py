@@ -49,17 +49,27 @@ class UtilityRetriever:
         self.dim, self.seed, self.hidden = dim, seed, hidden
         self.net = nn.Sequential(nn.Linear(4*dim, hidden), nn.ReLU(), nn.Linear(hidden, 1), nn.Tanh())
 
-    def fit(self, features, rewards, epochs=60, lr=0.003):
+    def fit(self, features, rewards, epochs=60, lr=0.003, resume_state=None, checkpoint=None):
         x, y = torch.as_tensor(features), torch.as_tensor(rewards, dtype=torch.float32)
         optimizer = torch.optim.AdamW(self.net.parameters(), lr=lr)
         history = []
+        if resume_state is not None:
+            from .checkpoints import restore_rng
+            self.net.load_state_dict(resume_state["model"])
+            optimizer.load_state_dict(resume_state["optimizer"])
+            history = list(resume_state["history"])
+            restore_rng(resume_state["rng"])
         self.net.train()
-        for _ in range(epochs):
+        for _ in range(len(history), epochs):
             optimizer.zero_grad()
             loss = nn.functional.mse_loss(self.net(x).squeeze(-1), y)
             loss.backward()
             optimizer.step()
             history.append(float(loss.detach()))
+            if checkpoint is not None:
+                from .checkpoints import rng_state
+                checkpoint({"model": self.net.state_dict(), "optimizer": optimizer.state_dict(),
+                            "scheduler": None, "epoch": len(history), "history": list(history), "rng": rng_state()})
         self.net.eval()
         return history
 
