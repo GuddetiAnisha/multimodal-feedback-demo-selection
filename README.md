@@ -54,6 +54,27 @@ Keep the **entire output folder**, especially `checkpoints/`, on storage that su
 
 ### Natural science only
 
+For the smaller agreed experiment, use `configs/scienceqa_natural_practical.yaml`
+with your existing prepared natural-science data:
+
+~~~powershell
+.\.venv\Scripts\python.exe run_experiments.py --config configs/scienceqa_natural_practical.yaml --output results/scienceqa_natural_practical_gpu
+# Later:
+.\.venv\Scripts\python.exe run_experiments.py --config configs/scienceqa_natural_practical.yaml --output results/scienceqa_natural_practical_gpu --resume
+~~~
+
+This retains all eligible prepared examples, six methods, CUDA, and 100 utility
+training epochs. It uses seed 0, k=0/2/4, best-first ordering, a 4096-token evaluation
+budget and four feedback demonstrations per query. The feedback context budget
+remains 8192; other model and training settings are unchanged. For the verified
+1170 feedback and 2362 evaluation queries, this is 50,728 prediction calls rather
+than 1,335,172 in the original natural-science grid (about 26 times fewer).
+These counts exclude encoding and token-count preprocessing and do not promise
+the same factor of runtime speedup. A single seed cannot estimate between-seed
+variability. Stop the larger run before starting this one; its checkpoint/config
+cannot be resumed into the smaller grid. Keep its output folder, and use the new
+output folder above. Existing natural-science data needs no re-preparation.
+
 Prepare all real natural-science examples with no trial cap. Filtering is applied
 to official train and validation before image grouping and leakage exclusions:
 

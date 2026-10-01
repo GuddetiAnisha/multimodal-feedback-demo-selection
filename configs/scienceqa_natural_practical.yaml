@@ -1,0 +1,30 @@
+# All prepared natural-science data; smaller grid for college-computer sessions.
+device: cuda
+index_backend: torch
+dataset:
+  kind: jsonl
+  demos: data/scienceqa_natural/demos.jsonl
+  feedback: data/scienceqa_natural/feedback.jsonl
+  evaluation: data/scienceqa_natural/evaluation.jsonl
+encoder:
+  kind: clip
+  model: clip-ViT-B-32
+  device: cuda
+model:
+  kind: hf
+  model_id: Qwen/Qwen2.5-VL-3B-Instruct
+  revision: main
+  device: cuda
+  max_new_tokens: 32
+methods: [random, visual, textual, multimodal, feedback, grip_approx]
+variants: [full]
+seeds: [0]
+ks: [0, 2, 4]
+orderings: [best_first]
+context_budgets: [4096]
+feedback_context_budget: 8192
+feedback_candidates: 4
+candidate_pool: 64
+redundancy_penalty: 0.25
+epochs: 100
+threads: 1
