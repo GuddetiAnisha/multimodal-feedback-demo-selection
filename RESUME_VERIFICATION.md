@@ -2,7 +2,7 @@
 
 Validated on Windows with Python 3.14.4 and PyTorch 2.12.1+cpu.
 
-Latest full suite after Windows checkpoint-lock recovery: **37 passed, 8 skipped**. One skip requires
+Latest full suite after leakage-safe dataset preparation: **41 passed, 8 skipped**. One skip requires
 optional FAISS; seven skips require CUDA hardware and CUDA-enabled PyTorch.
 The machine has an NVIDIA RTX 2000 Ada (16 GiB VRAM, detected with nvidia-smi),
 but the verification interpreter has CPU-only PyTorch. Actual GPU execution
@@ -40,7 +40,13 @@ generations; storage and write cost grows with the number of completed units.
 
 These checks use synthetic data and the offline mock model. They establish
 software behavior, not ScienceQA accuracy or real-HF/GPU reproducibility. Real
-models and benchmark datasets were not downloaded or evaluated. A shutdown can
+model weights were not evaluated. The full user-downloaded ScienceQA train and
+validation data was read to validate the preparation fix: 12,726 official train
+rows, 4,241 validation rows; 1,097 overlapping training rows excluded, 11,629
+retained (9,301 demonstrations / 2,328 feedback), all 4,241 validation rows kept.
+Strict ID/group/exact-image leakage validation passed. Tests additionally cover
+transitive overlap, repeated training images, label-independent grouping and
+duplicate IDs. Near-duplicate image detection is not implemented. A shutdown can
 repeat the work after the most recent valid checkpoint; corrupted-newest fallback
 can repeat units committed only in that damaged generation.
 

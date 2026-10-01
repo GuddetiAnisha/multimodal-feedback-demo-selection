@@ -197,7 +197,7 @@ These are retriever-representation ablations; model prompts retain the complete 
 python -m pip install -e ".[hf]"
 # Optional, platform dependent:
 python -m pip install -e ".[faiss]"
-python scripts/prepare_data.py scienceqa --root data/ScienceQA/data/scienceqa --output data/scienceqa --limit 100
+python scripts/prepare_data.py scienceqa --root data/ScienceQA/data/scienceqa --output data/scienceqa
 python -m mfgds.experiment --config configs/scienceqa.yaml --output results/scienceqa_trial
 ~~~
 
@@ -211,7 +211,7 @@ data/ScienceQA/data/scienceqa/
   images/val/<problem_id>/image.png
 ~~~
 
-Rearrange or link image directories if the downloaded release uses a different layout. The script partitions official training groups 80%/20% into demonstrations/feedback and holds official validation out for evaluation. The optional limit caps each resulting split; this is not an official full-benchmark evaluation. Pre-register the final split protocol for thesis results.
+Rearrange or link image directories if the downloaded release uses a different layout. The script holds official validation intact for evaluation, excludes training components sharing exact image bytes or original task groups with validation, and partitions the remaining connected training groups 80%/20% into demonstrations/feedback. Repeated training images are kept together. The default applies no sample cap. Counts and excluded training IDs are written to `preparation_report.json`; official source data remains unchanged. Optional `--limit` caps each resulting split. This protocol evaluates official validation, not the official test benchmark. Pre-register the split protocol for thesis results.
 
 The model adapter uses AutoProcessor, AutoModelForImageTextToText, interleaved image/question and assistant-answer chat messages, and deterministic generation. It targets decoder-only, multi-image chat checkpoints such as Qwen2.5-VL. Not every checkpoint supports this format. Pin revision to a model commit and run a real-model smoke test on your hardware before a sweep.
 

@@ -91,6 +91,52 @@ def partition(rows, seed=0, fractions=(0.5, 0.25)):
     return [[x for x in rows if (x.group or x.id) in g] for g in buckets]
 
 
+def leakage_safe_training_pool(training, evaluation):
+    """Keep evaluation intact, exclude overlapping training groups, group repeats.
+
+    Components join both existing task groups and exact image-byte hashes. This
+    handles transitive overlap and keeps repeated images in one training split.
+    No target labels are used to construct groups or decide exclusions.
+    """
+    rows = list(training) + list(evaluation)
+    if len({x.id for x in rows}) != len(rows):
+        raise ValueError("Duplicate IDs within/across official splits")
+    parent = list(range(len(rows)))
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    def union(a, b):
+        a, b = find(a), find(b)
+        parent[max(a, b)] = min(a, b)
+    group_owner, image_owner, hashes = {}, {}, {}
+    for i, row in enumerate(rows):
+        if row.group:
+            union(i, group_owner.setdefault(row.group, i))
+        if row.image:
+            path = str(Path(row.image).resolve())
+            if path not in hashes:
+                hashes[path] = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            union(i, image_owner.setdefault(hashes[path], i))
+    eval_components = {find(i) for i in range(len(training), len(rows))}
+    grouped = [replace(row, group="content:" + rows[find(i)].id) for i, row in enumerate(rows)]
+    retained, excluded = [], []
+    for i, row in enumerate(grouped[:len(training)]):
+        (excluded if find(i) in eval_components else retained).append(row)
+    held_out = grouped[len(training):]
+    audit = {
+        "policy": "Keep all official evaluation rows; exclude overlapping training components; partition remaining components together",
+        "official_training_rows": len(training), "official_evaluation_rows": len(evaluation),
+        "retained_training_rows": len(retained), "excluded_training_rows": len(excluded),
+        "excluded_training_ids": [x.id for x in excluded],
+        "training_components": len({x.group for x in retained}),
+        "evaluation_components": len({x.group for x in held_out}),
+        "grouping": "Connected components of original task/image groups and SHA256 of image file bytes",
+    }
+    return retained, held_out, audit
+
+
 def validate_splits(*splits):
     seen_ids, seen_groups, seen_images = set(), set(), set()
     for rows in splits:

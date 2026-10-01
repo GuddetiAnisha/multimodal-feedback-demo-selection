@@ -43,8 +43,14 @@ environment**. Installing the CUDA toolkit alone does not replace that wheel.
 Download ScienceQA separately, following the README's expected folder layout:
 
 ```powershell
-python scripts/prepare_data.py scienceqa --root data/ScienceQA/data/scienceqa --output data/scienceqa --limit 100
+python scripts/prepare_data.py scienceqa --root data/ScienceQA/data/scienceqa --output data/scienceqa
 ```
+
+Preparation uses every eligible training row and all validation rows, with no
+sample cap. Repeated images stay in one demonstration/feedback group. Training
+components sharing exact image content or task groups with validation are
+excluded to preserve held-out evaluation. Counts and excluded IDs are saved in
+`data/scienceqa/preparation_report.json`; official source files remain unchanged.
 
 The first real run downloads Qwen and CLIP model weights. The ZIP includes the
 complete application source, configs, setup instructions and tests; pretrained
