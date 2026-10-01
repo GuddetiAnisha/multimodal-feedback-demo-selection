@@ -6,7 +6,7 @@ from mfgds import experiment
 from mfgds.checkpoints import Checkpoints, output_lock
 
 
-CONFIG = {"dataset": {"kind": "synthetic", "sizes": [6, 3, 2]},
+CONFIG = {"device": "cpu", "dataset": {"kind": "synthetic", "sizes": [6, 3, 2]},
           "methods": ["random", "feedback", "grip_approx"], "variants": ["full", "no_image"],
           "seeds": [7, 9], "ks": [0, 2], "orderings": ["random", "best_last"],
           "context_budgets": [128], "feedback_candidates": 2, "epochs": 3,
@@ -14,8 +14,12 @@ CONFIG = {"dataset": {"kind": "synthetic", "sizes": [6, 3, 2]},
 
 
 @pytest.mark.parametrize("stage", ["feedback", "training", "evaluation", "complete"])
-def test_interruption_resume_matches_uninterrupted(tmp_path, monkeypatch, stage):
-    expected = experiment.run(CONFIG, tmp_path / "reference")
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA hardware unavailable"))])
+def test_interruption_resume_matches_uninterrupted(tmp_path, monkeypatch, stage, device):
+    config = copy.deepcopy(CONFIG)
+    config.update(device=device, index_backend="torch")
+    expected = experiment.run(config, tmp_path / "reference")
     save = Checkpoints.save
     interrupted = False
     def stop(self, state):
@@ -26,7 +30,7 @@ def test_interruption_resume_matches_uninterrupted(tmp_path, monkeypatch, stage)
             raise KeyboardInterrupt
     monkeypatch.setattr(Checkpoints, "save", stop)
     with pytest.raises(KeyboardInterrupt):
-        experiment.run(CONFIG, tmp_path / "resumed")
+        experiment.run(config, tmp_path / "resumed")
     monkeypatch.setattr(Checkpoints, "save", save)
     # Fail if any committed prediction is executed again.
     checkpoint = Checkpoints(tmp_path / "resumed").load()
@@ -35,7 +39,7 @@ def test_interruption_resume_matches_uninterrupted(tmp_path, monkeypatch, stage)
         def forbidden(*args, **kwargs):
             raise AssertionError("Completed inference repeated")
         monkeypatch.setattr(experiment.MockLMM, "predict", forbidden)
-    actual = experiment.run(CONFIG, tmp_path / "resumed", resume=True)
+    actual = experiment.run(config, tmp_path / "resumed", resume=True)
     columns = [c for c in expected if c not in {"latency_s", "retrieval_s"}]
     pd.testing.assert_frame_equal(expected[columns], actual[columns])
     for key, row in saved.items():

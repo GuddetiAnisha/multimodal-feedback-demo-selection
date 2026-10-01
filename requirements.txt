@@ -1,3 +1,3 @@
--e .[dev]
-# Optional real-model dependencies: pip install -e ".[hf]"
+-e .[dev,hf]
+# Install a CUDA-enabled PyTorch wheel first using https://pytorch.org/get-started/locally/
 # Optional FAISS: pip install -e ".[faiss]"

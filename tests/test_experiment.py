@@ -5,7 +5,7 @@ from mfgds.experiment import run
 
 
 def test_end_to_end_reproducibility_and_audit(tmp_path):
-    config = {"dataset": {"kind": "synthetic", "sizes": [9, 6, 3]}, "methods": ["random", "visual", "textual", "multimodal", "feedback", "grip_approx"],
+    config = {"device": "cpu", "dataset": {"kind": "synthetic", "sizes": [9, 6, 3]}, "methods": ["random", "visual", "textual", "multimodal", "feedback", "grip_approx"],
               "variants": ["full"], "seeds": [7], "ks": [0, 2], "orderings": ["best_first"], "context_budgets": [128],
               "feedback_candidates": 3, "epochs": 3}
     a = run(config, tmp_path / "a")

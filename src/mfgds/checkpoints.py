@@ -4,6 +4,7 @@ import io
 import os
 from pathlib import Path
 import random
+import time
 import warnings
 from contextlib import contextmanager
 import numpy as np
@@ -21,6 +22,8 @@ def restore_rng(state):
     np.random.set_state(state["numpy"])
     torch.set_rng_state(state["torch"])
     if state["cuda"] is not None and torch.cuda.is_available():
+        if len(state["cuda"]) != torch.cuda.device_count():
+            raise RuntimeError("Checkpoint CUDA device count differs; use the same GPU setup to resume")
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
@@ -31,7 +34,22 @@ def atomic_bytes(path, data):
         stream.write(data)
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    # Windows scanners/indexers can briefly open the destination without delete
+    # sharing. Never delete the committed generation to work around that lock.
+    for attempt in range(9):
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) not in {5, 32, 33}:
+                raise
+            if attempt == 8:
+                raise PermissionError(
+                    f"Cannot replace {path} after retrying temporary Windows file locks. "
+                    "The previous checkpoint is preserved. Close programs inspecting "
+                    "this file and check folder write permissions, then run with --resume."
+                ) from error
+            time.sleep(min(0.1 * 2**attempt, 2.0))
 
 
 @contextmanager

@@ -1,3 +1,5 @@
+device: cuda
+index_backend: torch
 dataset:
   kind: synthetic
   sizes: [24, 12, 12]

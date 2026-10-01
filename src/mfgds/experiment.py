@@ -12,6 +12,7 @@ import pandas as pd
 import torch
 import yaml
 from .checkpoints import Checkpoints, atomic_bytes, output_lock
+from .devices import resolve_device
 from .data import synthetic, load_jsonl, validate_splits
 from .embeddings import HashEncoder, ClipEncoder, retrieval_view
 from .evaluation import score, report
@@ -35,6 +36,11 @@ def _run(config, output, resume=False):
     output.mkdir(parents=True, exist_ok=True)
     if not resume and ((output / "manifest.json").exists() or (output / "checkpoints").exists()):
         raise FileExistsError("Use a fresh output directory to preserve prior results")
+    device = resolve_device(config.get("device", "cuda"))
+    print(f"Compute device: {device}" + (f" ({torch.cuda.get_device_name(device)})" if device.type == "cuda" else ""), flush=True)
+    index_backend = config.get("index_backend", "torch" if device.type == "cuda" else "auto")
+    if device.type == "cuda" and index_backend != "torch":
+        raise ValueError("GPU mode requires index_backend: torch (or --device cuda)")
     methods = config.get("methods", sorted(METHODS - {"grip_external"}))
     variants = config.get("variants", ["full"])
     if set(methods)-METHODS or set(variants)-set(CHANNELS):
@@ -69,12 +75,15 @@ def _run(config, output, resume=False):
     ecfg = config.get("encoder", {"kind": "hash"})
     if ecfg["kind"] not in {"hash", "clip"}:
         raise ValueError("Unknown encoder")
-    encoder = HashEncoder() if ecfg["kind"] == "hash" else ClipEncoder(ecfg.get("model", "clip-ViT-B-32"), ecfg.get("device", "cpu"))
+    encoder_device = str(device)
+    encoder = HashEncoder() if ecfg["kind"] == "hash" else ClipEncoder(ecfg.get("model", "clip-ViT-B-32"), encoder_device)
     mcfg = config.get("model", {"kind": "mock"})
     if mcfg["kind"] not in {"mock", "hf"}:
         raise ValueError("Unknown model")
-    model = MockLMM() if mcfg["kind"] == "mock" else HuggingFaceLMM(**{k: v for k, v in mcfg.items() if k != "kind"})
+    mcfg = dict(mcfg, device=str(device))
+    model = MockLMM(device=device) if mcfg["kind"] == "mock" else HuggingFaceLMM(**{k: v for k, v in mcfg.items() if k != "kind"})
     manifest = {"config": config, "status": "running", "mock": mcfg["kind"] == "mock", "synthetic": dataset["kind"] == "synthetic",
+                "compute_device": str(device), "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
                 "token_measurement": model.token_measurement, "python": platform.python_version(),
                 "versions": {p: importlib.metadata.version(p) for p in ["torch", "numpy", "scikit-learn", "pandas", "Pillow"]},
                 "split_ids": {k: [x.id for x in v] for k, v in [("demos", demos), ("feedback", train), ("evaluation", test)]}}
@@ -83,6 +92,7 @@ def _run(config, output, resume=False):
         [x.id, x.question, x.answer, x.choices, x.answers, x.group, hashlib.sha256(Path(x.image).read_bytes()).hexdigest() if x.image else None]
         for x in demos+train+test], sort_keys=True).encode()).hexdigest()
     identity = {"config": config, "data_sha256": manifest["data_sha256"], "versions": manifest["versions"], "python": manifest["python"]}
+    identity["compute"] = {"device": str(device), "gpu": manifest["gpu_name"], "cuda": torch.version.cuda}
     if "grip_scores" in config:
         identity["grip_sha256"] = hashlib.sha256(Path(config["grip_scores"]).read_bytes()).hexdigest()
     if state is not None and state["identity"] != identity:
@@ -148,7 +158,7 @@ def _run(config, output, resume=False):
             trained = {}
             for learned in sorted(set(methods) & {"feedback", "grip_approx"}):
                 ds, qs = (d[:, :encoder.dim], qtrain[:, :encoder.dim]) if learned == "grip_approx" else (d, qtrain)
-                net = UtilityRetriever(ds.shape[1], seed)
+                net = UtilityRetriever(ds.shape[1], seed, device=device)
                 features = np.stack([pair_features(qs[qi], ds[di]) for qi, di in pairs])
                 training_key = (seed, variant, learned)
                 def save_epoch(payload):
@@ -160,7 +170,7 @@ def _run(config, output, resume=False):
                 net.save(output / f"retriever_{variant}_{learned}_{seed}.pt")
                 losses.extend({"variant": variant, "method": learned, "seed": seed, "epoch": i, "mse": value} for i, value in enumerate(history))
                 trained[learned] = net
-            indexes = {m: VectorIndex(retrieval_view(d, m), config.get("index_backend", "auto"))
+            indexes = {m: VectorIndex(retrieval_view(d, m), index_backend, device=device)
                        for m in ["visual", "textual", "multimodal"]}
             manifest["index_backend"] = indexes["multimodal"].backend
             for qi, example in enumerate(test):
@@ -185,7 +195,7 @@ def _run(config, output, resume=False):
                     for k, ordering, budget in itertools.product(config["ks"], config["orderings"], config["context_budgets"]):
                         strength = config.get("redundancy_penalty", .25) if actual_method in {"feedback", "grip_approx", "grip_external"} and variant != "no_diversity" else 0
                         selection_vectors = d[ids, :encoder.dim] if actual_method == "grip_approx" else d[ids]
-                        local = select(scores, selection_vectors, k, strength)
+                        local = select(scores, selection_vectors, k, strength, device=device)
                         local = order(local, scores, ordering, rng)
                         selected_ids = [int(ids[i]) for i in local]
                         kept, tokens = fit_context(query, [demos[i] for i in selected_ids], model, budget)
@@ -197,7 +207,7 @@ def _run(config, output, resume=False):
                             continue
                         pred = model.predict(query, kept)
                         value = score(pred.text, example)
-                        div, red = diversity(d[selected_ids])
+                        div, red = diversity(d[selected_ids], device=device)
                         rows.append({"seed": seed, "variant": variant, "method": method, "k": k, "ordering": ordering,
                                      "context_budget": budget, "query_id": example.id, "query_group": example.group or example.id,
                                      "prediction": pred.text, "target": example.answer, "score": value, "zero_score": test_zero[qi],
@@ -228,11 +238,15 @@ def _run(config, output, resume=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/mock.yaml")
-    parser.add_argument("--output", default="results/mock")
+    parser.add_argument("--config", default="configs/scienceqa.yaml")
+    parser.add_argument("--output", default="results/scienceqa_gpu")
     parser.add_argument("--resume", action="store_true", help="Continue the latest valid checkpoint in --output")
+    parser.add_argument("--device", help="Override all model/training/retrieval placement: cuda, cuda:N, cpu, auto")
     args = parser.parse_args()
     config = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    if args.device:
+        config["device"] = args.device
+        config["index_backend"] = "torch"
     try:
         run(config, args.output, resume=args.resume)
     except KeyboardInterrupt:

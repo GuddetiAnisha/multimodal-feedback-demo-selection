@@ -33,7 +33,9 @@ class MockLMM:
     max_new_tokens = 8
     token_measurement = "estimated_words_plus_16_per_image"
 
-    def __init__(self):
+    def __init__(self, device="cpu"):
+        from .devices import resolve_device
+        self.device = resolve_device(device)
         self.encoder = HashEncoder()
 
     def count_tokens(self, query, demos):
@@ -49,8 +51,18 @@ class MockLMM:
             q = self.encoder.encode([query], query=True)[0]
             d = self.encoder.encode(demos)
             # Artificial recency effect permits ordering smoke tests without targets.
-            scores = d[:, :48] @ q[:48] + 0.8*(d[:, 48:96] @ q[48:96]) + np.arange(len(d))*0.02
-            answer = demos[int(np.argmax(scores))].answer
+            if self.device.type == "cuda":
+                import torch
+                with torch.inference_mode():
+                    qt = torch.as_tensor(q, device=self.device)
+                    dt = torch.as_tensor(d, device=self.device)
+                    similarity = dt[:, :48] @ qt[:48] + 0.8*(dt[:, 48:96] @ qt[48:96])
+                    scores = similarity.double() + torch.arange(len(d), device=self.device, dtype=torch.float64)*0.02
+                    best = int(scores.argmax().item())
+            else:
+                scores = d[:, :48] @ q[:48] + 0.8*(d[:, 48:96] @ q[48:96]) + np.arange(len(d))*0.02
+                best = int(np.argmax(scores))
+            answer = demos[best].answer
         return Prediction(answer, tokens, len(answer.split()), time.perf_counter()-start)
 
 

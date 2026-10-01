@@ -1,3 +1,4 @@
+device: cuda
 dataset:
   kind: synthetic
   sizes: [24, 12, 12]
@@ -18,4 +19,4 @@ candidate_pool: 24
 redundancy_penalty: 0.25
 epochs: 60
 threads: 1
-index_backend: auto
+index_backend: torch

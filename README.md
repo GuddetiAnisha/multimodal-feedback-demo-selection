@@ -1,6 +1,6 @@
 # Multimodal Feedback-Guided Demonstration Selection
 
-A software-only master's-thesis research prototype for selecting image/question/answer demonstrations for large multimodal models. Includes an offline CPU pipeline and optional Hugging Face integration.
+A software-only master's-thesis research prototype for selecting image/question/answer demonstrations for large multimodal models. This edition requires an NVIDIA CUDA GPU by default for model computation. See [START_HERE_PYCHARM.md](START_HERE_PYCHARM.md) for setup.
 
 **Synthetic/mock outputs validate software only. They are not benchmark findings.** See [VERIFICATION.md](VERIFICATION.md) for the completed local checks and publication limitations.
 
@@ -10,8 +10,10 @@ Python 3.10+; the original local run used Python 3.11 on Windows. From this repo
 
 ~~~powershell
 python -m venv .venv
-.venv/Scripts/python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-.venv/Scripts/python -m pip install -e ".[dev]"
+# Install CUDA-enabled PyTorch in .venv using the official installer:
+# https://pytorch.org/get-started/locally/ (Windows / Pip / Python / CUDA)
+.venv/Scripts/python -m pip install -e ".[dev,hf]"
+.venv/Scripts/python scripts/check_gpu.py
 .venv/Scripts/python -m pytest -q
 .venv/Scripts/python -m mfgds.experiment --config configs/mock.yaml --output results/my_mock_run
 .venv/Scripts/python -m mfgds.experiment --config configs/ablations.yaml --output results/my_ablations
@@ -20,6 +22,8 @@ python -m venv .venv
 On Linux/macOS replace .venv/Scripts/python with .venv/bin/python. Mock mode downloads no model or dataset; PyTorch trains the utility network. Start each new run in a fresh output directory; use `--resume` to continue an existing run. Predictions/selections were reproducible in the tested CPU environment; timings vary.
 
 ## Stop and resume on the college computer
+
+Every included experiment configuration requires CUDA by default. Follow the GPU/PyCharm setup below first. There is no automatic CPU fallback.
 
 From the project folder in PowerShell, after installing the dependencies above:
 
@@ -38,9 +42,90 @@ Checkpointing occurs after every utility-training epoch, feedback sample, zero-s
 
 `--resume` chooses the newest valid checksummed generation and warns if it falls back to the previous generation. Writes are flushed and atomically replaced; incomplete `.tmp` files are ignored. If both generations are invalid or missing, resume fails without silently restarting. The current uncommitted epoch or inference call may be repeated. Committed work is skipped; completed results are rebuilt without repeating inference. Selection draws are replayed cheaply from the seed to preserve the original experiment ordering. CSVs and plots are regenerated from checkpoint results, so an interrupted report can be repaired by resuming.
 
+On Windows, checkpoint replacement retries transient access/sharing errors for
+approximately nine seconds. This accommodates temporary locks from file scanners
+and other programs without deleting the last committed checkpoint. If access is
+still denied, close programs inspecting checkpoint files and verify the output
+folder is writable. Keep `results/` and retry the same command with `--resume`.
+
 Keep the **entire output folder**, especially `checkpoints/`, on storage that survives college-PC cleanup. Keep the original config, datasets, model cache and Python environment available. Resume rejects changed configuration, dataset content, external GRIP scores, Python or core package versions. Only one process can write an output folder. Checkpoints contain trusted Python/PyTorch serialization: only resume checkpoints created by your own run. Saving full progress after each unit favors recoverability over disk speed and may be costly for very large sweeps. The separate sensor-fusion extension has its existing behavior; these resume options apply to demonstration-selection experiments.
 
-Dependencies and optional extras are in [pyproject.toml](pyproject.toml). [requirements-tested.txt](requirements-tested.txt) records packages from the local verification environment; its CPU PyTorch wheel requires the PyTorch CPU index when reinstalling.
+## NVIDIA GPU in PyCharm
+
+Use the project virtual environment as PyCharm's interpreter and working directory.
+Install the NVIDIA driver and **CUDA-enabled PyTorch in that interpreter**. A CUDA
+toolkit installation does not turn the CPU-only PyTorch wheel into a GPU wheel.
+Use the [official PyTorch installer](https://pytorch.org/get-started/locally/),
+select Windows / Pip / Python / the CUDA platform supported by your driver, and
+run its generated installation command in PyCharm's Terminal. If you previously
+installed CPU-only PyTorch, remove that wheel first:
+
+~~~powershell
+python -m pip uninstall -y torch torchvision torchaudio
+# Run the CUDA installation command from the official selector here.
+python -m pip install -e ".[dev,hf]"
+python scripts/check_gpu.py
+~~~
+
+The check displays the interpreter, PyTorch CUDA runtime, GPU name and VRAM, and
+runs a small CUDA matrix multiplication. Continue only when CUDA is available.
+For an offline GPU trial (hash encoder and mock simulator still perform CPU fixture work):
+
+~~~powershell
+python run_experiments.py --config configs/mock.yaml --output results/mock_gpu --device cuda
+# Stop with Ctrl+C; later:
+python run_experiments.py --config configs/mock.yaml --output results/mock_gpu --device cuda --resume
+~~~
+
+After preparing ScienceQA as described below, run the full GPU configuration:
+
+~~~powershell
+python run_experiments.py --config configs/scienceqa_gpu.yaml --output results/scienceqa_gpu
+# Later, keep the same config and output:
+python run_experiments.py --config configs/scienceqa_gpu.yaml --output results/scienceqa_gpu --resume
+~~~
+
+For PyCharm's Run button: script `run_experiments.py`, working directory the project
+folder, Parameters `--config configs/scienceqa_gpu.yaml --output results/scienceqa_gpu`.
+Add `--resume` after stopping. Both ScienceQA configs now require CUDA by default;
+`python run_experiments.py` also defaults to ScienceQA on GPU. The optional `--device` override controls encoder,
+HF model, utility training and retrieval placement without changing the grid or
+training hyperparameters. `cuda:N` selects another GPU; `auto` chooses CUDA when
+available and otherwise CPU. Explicit `cuda` never silently falls back to CPU.
+
+GPU mode puts CLIP, Qwen, the utility networks, their training tensors, exact cosine
+retrieval, selection similarity calculations and diversity calculations on the
+GPU. Data decoding, tokenization, random ordering, bookkeeping, checkpoint writes,
+CSV reports and plots use CPU. Mock prediction similarity also runs on GPU; the
+hash fixture's image decoding and text hashing remain CPU preprocessing.
+The startup message and manifest record the compute device and GPU name. The
+PyTorch retrieval backend replaces the CPU FAISS/sklearn path in GPU mode and uses
+stable ordering for equal scores; no Windows FAISS-GPU installation is needed.
+
+Training checkpoint model/optimizer tensors are detached CPU copies and restored
+onto the selected device. CUDA RNG state is restored for resume on the same GPU
+setup; deterministic kernels are requested. CPU and GPU floating-point results
+can differ. Use a **new output folder** when switching a previous CPU experiment
+to GPU or changing the Python/PyTorch installation; existing checkpoint settings
+must match. Save hardware/package information with research runs.
+
+Qwen and CLIP share GPU memory. Required VRAM depends on image sizes, number of
+demonstrations and context budget; GPU allocation failure does not trigger hidden
+CPU offloading. Keep original budgets for comparable experiments. If your GPU
+cannot fit them, start a separately named experiment with a deliberately adjusted
+config. Small utility networks and tiny retrieval pools can run more slowly on a
+GPU due to transfers; this option prioritizes your requested placement.
+
+The separate sensor-fusion script also supports GPU training and evaluation:
+
+~~~powershell
+python scripts/run_sensor_fusion_robustness.py --device cuda --output results/sensor_gpu.json
+~~~
+
+That script's default device is `cuda`; it does not use the demonstration-selection
+resume mechanism.
+
+Dependencies and optional extras are in [pyproject.toml](pyproject.toml). [requirements-tested.txt](requirements-tested.txt) records the historical CPU verification environment and must not be used to install this GPU edition.
 
 ## Layout
 
@@ -53,7 +138,7 @@ src/mfgds/
   models.py        Mock simulator and Hugging Face multimodal chat
   evaluation.py    Scores, clustered confidence intervals, plots and tables
   experiment.py    Feedback collection, training and experiment grid
-configs/           CPU, ablation and real-model configurations
+configs/           GPU-required mock, ablation and real-model configurations
 scripts/           Run experiments, prepare data, aggregate seed runs
 tests/             Leakage, retrieval, learning, adapters and integration tests
 results/           Generated experiments, excluded from Git
