@@ -49,14 +49,18 @@ def save_jsonl(rows, path):
     path.write_text("".join(json.dumps(asdict(x)) + "\n" for x in rows), encoding="utf-8")
 
 
-def scienceqa(root, split):
+def scienceqa(root, split, subject=None):
     """Official problems.json, pid_splits.json, images/{split}/{pid}/image.png."""
     root = Path(root)
+    if subject not in {None, "natural science", "social science", "language science"}:
+        raise ValueError("Unknown ScienceQA subject")
     problems = json.loads((root / "problems.json").read_text(encoding="utf-8"))
     ids = json.loads((root / "pid_splits.json").read_text(encoding="utf-8"))[split]
     rows = []
     for pid in ids:
         p = problems[str(pid)]
+        if subject is not None and p.get("subject") != subject:
+            continue
         image = root / "images" / split / str(pid) / p["image"] if p.get("image") else None
         if image and not image.is_file():
             raise FileNotFoundError(image)

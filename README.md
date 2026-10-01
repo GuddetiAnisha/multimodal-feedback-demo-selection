@@ -52,6 +52,27 @@ Keep the **entire output folder**, especially `checkpoints/`, on storage that su
 
 ## NVIDIA GPU in PyCharm
 
+### Natural science only
+
+Prepare all real natural-science examples with no trial cap. Filtering is applied
+to official train and validation before image grouping and leakage exclusions:
+
+~~~powershell
+.\.venv\Scripts\python.exe scripts/prepare_data.py scienceqa --root data/ScienceQA/data/scienceqa --output data/scienceqa_natural --subject "natural science"
+.\.venv\Scripts\python.exe run_experiments.py --config configs/scienceqa_natural.yaml --output results/scienceqa_natural_gpu
+# Later:
+.\.venv\Scripts\python.exe run_experiments.py --config configs/scienceqa_natural.yaml --output results/scienceqa_natural_gpu --resume
+~~~
+
+Use these parameters in PyCharm's Run configuration. A new data/output directory
+preserves the all-subject run; its checkpoints cannot resume the filtered dataset.
+The seeds, epochs, methods, k, ordering, context budgets and CUDA requirements are
+unchanged. The preparation report records the subject and excluded training IDs.
+Results apply to natural science only. The verified downloaded dataset produces
+4,690 demonstrations, 1,170 feedback queries and 2,362 validation queries, after
+excluding 1,013 training rows overlapping held-out groups. This is a smaller real
+experiment, but the unchanged grid still requires many inference calls.
+
 Use the project virtual environment as PyCharm's interpreter and working directory.
 Install the NVIDIA driver and **CUDA-enabled PyTorch in that interpreter**. A CUDA
 toolkit installation does not turn the CPU-only PyTorch wheel into a GPU wheel.

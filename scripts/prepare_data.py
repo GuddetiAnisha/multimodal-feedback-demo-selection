@@ -11,12 +11,17 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--subject", choices=["natural science", "social science", "language science"],
+                        help="ScienceQA subject filter applied before leakage-safe partitioning")
     parser.add_argument("--limit", type=int, default=0, help="Per-split cap after partitioning; 0 retains all")
     args = parser.parse_args()
     if args.benchmark == "scienceqa":
         # Hold out official validation for final evaluation; partition train by group.
-        official_train, official_eval = scienceqa(args.root, "train"), scienceqa(args.root, "val")
+        official_train = scienceqa(args.root, "train", subject=args.subject)
+        official_eval = scienceqa(args.root, "val", subject=args.subject)
     else:
+        if args.subject:
+            parser.error("--subject is only supported for ScienceQA")
         def load(split):
             return vqav2(args.root / f"v2_OpenEnded_mscoco_{split}_questions.json",
                          args.root / f"v2_mscoco_{split}_annotations.json", args.root / split, split)
@@ -31,7 +36,7 @@ def main():
     validate_splits(*splits)
     for name, rows in zip(["demos", "feedback", "evaluation"], splits):
         save_jsonl(rows, args.output / (name + ".jsonl"))
-    audit.update(benchmark=args.benchmark, seed=args.seed, limit=args.limit,
+    audit.update(benchmark=args.benchmark, subject=args.subject, seed=args.seed, limit=args.limit,
                  prepared_rows={name: len(rows) for name, rows in zip(["demos", "feedback", "evaluation"], splits)})
     (args.output / "preparation_report.json").write_text(json.dumps(audit, indent=2), encoding="utf-8")
     print(audit["prepared_rows"])

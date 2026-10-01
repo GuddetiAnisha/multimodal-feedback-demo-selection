@@ -59,3 +59,28 @@ def test_official_duplicate_ids_rejected():
     row = Example("duplicate", "Q", "A")
     with pytest.raises(ValueError, match="Duplicate IDs"):
         leakage_safe_training_pool([row], [row])
+
+
+def test_scienceqa_subject_filter_precedes_image_loading(tmp_path):
+    import json
+    from mfgds.data import scienceqa
+    problems = {
+        "1": {"subject": "natural science", "question": "N", "answer": 0, "choices": ["yes", "no"], "image": None},
+        "2": {"subject": "social science", "question": "S", "answer": 1, "choices": ["yes", "no"], "image": "missing.png"},
+        "3": {"subject": "language science", "question": "L", "answer": 0, "choices": ["yes", "no"], "image": None}}
+    (tmp_path / "problems.json").write_text(json.dumps(problems))
+    (tmp_path / "pid_splits.json").write_text(json.dumps({"train": ["1", "2", "3"], "val": ["1", "3"]}))
+    assert [x.id for x in scienceqa(tmp_path, "train", subject="natural science")] == ["scienceqa:1"]
+    assert [x.id for x in scienceqa(tmp_path, "val", subject="language science")] == ["scienceqa:3"]
+    with pytest.raises(ValueError, match="Unknown"):
+        scienceqa(tmp_path, "train", subject="unknown")
+
+
+def test_natural_config_preserves_grid():
+    from pathlib import Path
+    import yaml
+    base = yaml.safe_load(Path("configs/scienceqa.yaml").read_text())
+    natural = yaml.safe_load(Path("configs/scienceqa_natural.yaml").read_text())
+    assert natural["dataset"]["demos"] == "data/scienceqa_natural/demos.jsonl"
+    natural["dataset"] = base["dataset"]
+    assert natural == base
