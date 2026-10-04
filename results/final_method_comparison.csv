@@ -1,0 +1,7 @@
+method,k2_accuracy_pct,k4_accuracy_pct,gain_vs_random_k2_pp,gain_vs_random_k4_pp
+multimodal,85.224,84.251,2.385,1.454
+textual,84.124,83.531,1.284,0.734
+feedback,83.700,83.601,0.861,0.804
+visual,83.150,82.642,0.310,-0.155
+random,82.839,82.797,0.000,0.000
+grip_approx,82.430,82.218,-0.409,-0.579
