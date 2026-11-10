@@ -1,6 +1,6 @@
 # Multimodal Feedback-Guided Demonstration Selection
 
-A software-only master's-thesis research prototype for selecting image/question/answer demonstrations for large multimodal models. This edition requires an NVIDIA CUDA GPU by default for model computation. See [START_HERE_PYCHARM.md](START_HERE_PYCHARM.md) for setup.
+
 
 **Synthetic/mock outputs validate software only. They are not benchmark findings.** See [VERIFICATION.md](VERIFICATION.md) for the completed local checks and publication limitations.
 
